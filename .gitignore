@@ -4,6 +4,10 @@ data/*
 !data/.gitkeep
 reference/
 
+# generated from the benchmark data (canary-tagged) - regenerate locally:
+#   python tools/make_theme_docs.py
+docs/healthbench-themes/
+
 .venv/
 __pycache__/
 *.pyc

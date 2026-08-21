@@ -74,8 +74,22 @@ can be detected in training corpora. Don't strip it and don't publish model outp
 - There is **no system message** in the data — the prompt is pure user/assistant turns.
 - Rubric `points` are integers in **[-10, +10]** (0 never occurs). Of 57,237 rubrics in `full`,
   **17,575 are negative** — roughly 31%. Penalty criteria are a big share of the score surface.
-- `consensus` uses **cluster-level** rubrics (`level:cluster`, `cluster:<theme>_<category>_<aspect>`)
-  instead of per-example rubrics — a median of **2** rubrics per example rather than 11.
+
+**Rubrics come in two levels, and `full` contains both:**
+
+| Level | Count in `full` | Shape |
+| --- | --- | --- |
+| `level:example` | 49,184 | Short, specific, this-question-only criteria. Points from -10 to +10. This is the readable checklist. |
+| `level:cluster` | 8,053 | Long multi-paragraph policy statements shared across a theme+category, tagged `cluster:<theme>_<category>_<aspect>`. **All worth exactly +5.** |
+
+The cluster rubrics are the same ones that make up `healthbench_consensus.jsonl` — 3,671 of the
+5,000 `full` examples carry 2–3 of them in addition to their per-example rubrics. `healthbench_eval.py`
+does not filter by level: it grades whatever is in the file's `rubrics` list, so **cluster rubrics
+count toward the main HealthBench score too** (adding +5 each to the denominator).
+
+Worth reading the cluster rubrics directly — they spell out the graded policy in prose (e.g. the
+context-seeking one defines a priority hierarchy for *which* missing information to ask about
+first). `docs/healthbench-themes/*.md` surfaces them per theme.
 
 ## 3. Scoring formula (exact, from `healthbench_eval.py`)
 

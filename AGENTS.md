@@ -109,9 +109,11 @@ tools/
   fetch_data.py              general manifest-driven asset downloader
   assets.json                the asset manifest (committed; the data is not)
   hb.py                      HealthBench explorer CLI
+  make_theme_docs.py         generates docs/healthbench-themes/ from the data
 docs/
   lunit-hackathon-brief.md   platform reference: MCP tools, L2 two-stage model, submission rules
   healthbench-notes.md       benchmark format, exact scoring formula, composition stats
+  healthbench-themes/        gitignored; one readable .md per problem type (generated)
 data/                        gitignored; populated by fetch_data.py
 reference/simple-evals/      official grader source (fetched, gitignored)
 ```
@@ -154,6 +156,25 @@ examples* is clipped to [0,1] — individual examples are not floored.
 
 **Themes** (full): global_health 1,097 · hedging 1,071 · communication 919 · context_seeking 594 ·
 emergency_referrals 482 · health_data_tasks 477 · complex_responses 360.
+
+**Two rubric levels.** `full` carries 49,184 `level:example` rubrics (short, specific, -10..+10)
+*and* 8,053 `level:cluster` rubrics (long prose policy statements, all +5, shared with the consensus
+set). The grader doesn't filter by level, so both count. The cluster ones are worth reading — they
+state the graded policy explicitly.
+
+### Per-theme reading material
+
+```bash
+python tools/make_theme_docs.py       # -> docs/healthbench-themes/*.md
+```
+
+One Markdown file per theme: what it tests, split distribution, axis breakdown, the most frequent
+reward/penalty phrasings mined from the rubrics, the +10 and -10 criteria verbatim, and four worked
+examples (conversation + every rubric + the physician's ideal answer). Deterministic output, so
+regenerating produces no spurious diffs.
+
+Output is **gitignored** — it reproduces benchmark text verbatim and that data carries a canary
+string. Everyone regenerates locally from the committed script.
 
 Develop against `hard` (1,000 examples) — it's the discriminating subset and cheap to re-grade.
 The organizers score the final submission on **their own holdout**, not these files.
