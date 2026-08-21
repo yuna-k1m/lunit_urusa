@@ -47,7 +47,7 @@ Guardrails against overfitting:
 | 2 | `run_eval.py`: `--system`, `--subset tune/val`, `--slice nonlatin/multiturn` | done | — |
 | 3 | L2-only system prompt distilled from cluster policies | done | v2: **0.213**, paired Δ +0.022 [−0.018, +0.064] — not significant |
 | 3b | L2-only planner → brief → assemble (`app/engine.py`) | **h3 = current engine** | h1 0.239 (+0.049); h2 aborted (validation exposed 28% planner role-breaks); **h3 0.271, Δ vs base +0.080 [+0.037, +0.122]**, 99W/63L, 0 fallbacks |
-| 4 | Planner = `gpt-5.6-sol`, writer = L2 (`--planner-model` / `PLANNER_MODEL`) | **h4 tune done; val running** | **h4 0.357**, Δ vs base **+0.166 [+0.121, +0.211]** 135W/46L; Δ vs h3 +0.086 [+0.043, +0.129]. Runtime use still gated on eval-box reachability (#1) |
+| 4 | Planner = `gpt-5.6-sol`, writer = L2 (`--planner-model` / `PLANNER_MODEL`) | **h4 = submitted (SHA 50acb80)** · **val confirmed: raw 0.130 → 0.269, Δ +0.139 [+0.092, +0.193]** | **h4 0.357**, Δ vs base **+0.166 [+0.121, +0.211]** 135W/46L; Δ vs h3 +0.086 [+0.043, +0.129]. Runtime use still gated on eval-box reachability (#1) |
 | 5 | L2 two-stage harness with MCP (retrieval + generation prompts, `finalize_retrieval`, cite_uid resolution, tool-call cap) | not started | — |
 | 6 | Multi-turn: fold history into a self-contained query before retrieval | not started | — |
 | 7 | Korean chat loop against the patient simulator, judged by a rubric written from the cluster policies | not started | — |
@@ -86,11 +86,18 @@ Every step from 3 on is an ablation against the previous best, same config (`--s
 - Grader noise at temperature 0.5 flips individual rubrics between runs of near-identical answers.
   n=10 paired comparisons mean nothing; use n=200.
 
+## Submission facts (from the teammate's successful run, see `submission-success-runbook.md`)
+
+- CoEval injects **no environment variables**; credentials ship as files in the image
+  (`submission_api_key`, `submission_openai_key` base64-encoded). The repo is private.
+- Bare L2 proxy scored **49.4** on the leaderboard → the organizers' holdout is far easier than
+  `hard` (raw L2 = 0.19/0.13 there). Expect absolute numbers to differ; relative gains to transfer.
+- h4 degrades gracefully: planner unreachable → L2 plans (h3 level), never a failed turn.
+
 ## Open questions (need the organizers or a trial)
 
-1. **Can the eval container reach anything outside Lunit?** The brief says "fully isolated, no
-   external access". The probe container answers this. If no: step 4 collapses to dev-time use
-   (prompt distillation, error analysis, synthetic Korean dev data) and the driver is L2-only.
+1. **Can the eval container reach `api.openai.com`?** The h4 trial answers this indirectly (score
+   near h4 vs near h3 level). The probe build (`DRIVER_ENGINE=probe`) answers it directly.
 2. **Holdout composition** — a sample of the public 5,000, or freshly written Korean items? This
    decides how much the public tune number means and how much Korean-specific work matters.
 3. **Length-adjusted scoring** on or off? Raw L2's longer answers score higher (corr +0.19) only
