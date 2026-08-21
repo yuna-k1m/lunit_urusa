@@ -27,7 +27,7 @@ from app import engine, probe
 MODEL_ID = os.environ.get("DRIVER_MODEL_ID", "lunit-urusa-driver")
 ENGINE = os.environ.get("DRIVER_ENGINE", "harness")
 _l2 = engine.L2Client()
-_planner = engine.planner_from_env(_l2)
+_planner = engine.planner_from_env(_l2)  # None -> L2 plans
 
 app = FastAPI(title="lunit-urusa driver")
 

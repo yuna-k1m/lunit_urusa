@@ -30,6 +30,29 @@ import urllib.request
 from pathlib import Path
 
 PROMPTS = Path(__file__).resolve().parent / "prompts"
+ROOT = Path(__file__).resolve().parent.parent
+
+# CoEval injects no environment variables, so credentials ship inside the image as
+# files next to the app package (see docs/submission-success-runbook.md). An env
+# var, when present, always wins.
+KEY_FILES = {
+    "LUNIT_FM_API_KEY": ROOT / "submission_api_key",
+    "OPENAI_API_KEY": ROOT / "submission_openai_key",
+}
+
+
+def resolve_key(*env_names: str) -> str:
+    for name in env_names:
+        v = os.environ.get(name)
+        if v:
+            return v.strip()
+    for name in env_names:
+        f = KEY_FILES.get(name)
+        if f and f.exists():
+            v = f.read_text(encoding="utf-8").strip()
+            if v:
+                return v
+    return ""
 PLANNER_SYSTEM = (PROMPTS / "planner.md").read_text(encoding="utf-8").strip()
 GENERATION_SYSTEM = (PROMPTS / "generation.md").read_text(encoding="utf-8").strip()
 
@@ -48,9 +71,11 @@ class L2Client:
         *,
         timeout: float = 180.0,
         max_inflight: int = 8,
+        retries: int = 6,
     ) -> None:
+        self.retries = retries
         self.base = (base or os.environ.get("LUNIT_FM_API_URL", "https://model.hackathon.lunit.io")).rstrip("/")
-        self.key = key or os.environ.get("LUNIT_FM_API_KEY") or os.environ.get("LUNIT_KEY") or ""
+        self.key = key or resolve_key("LUNIT_FM_API_KEY", "LUNIT_KEY")
         self.model = model or os.environ.get("LUNIT_FM_MODEL", "Lunit/L2-preview")
         self.timeout = timeout
         # OpenAI reasoning models (gpt-5*) reject `temperature` and `max_tokens`
@@ -61,7 +86,8 @@ class L2Client:
         self._ulock = threading.Lock()
 
     def chat(self, messages: list[dict], *, temperature: float, max_tokens: int,
-             response_format: dict | None = None, retries: int = 6) -> str:
+             response_format: dict | None = None, retries: int | None = None) -> str:
+        retries = self.retries if retries is None else retries
         body: dict = {"model": self.model, "messages": messages}
         if self.reasoning_style:
             body["max_completion_tokens"] = max_tokens
@@ -364,18 +390,26 @@ def assemble(answer: str, plan: dict) -> tuple[str, dict]:
 
 # ------------------------------------------------------------------------ api
 
-def planner_from_env(default: L2Client, max_inflight: int = 8) -> L2Client:
-    """PLANNER_MODEL unset -> L2 plans. Otherwise an OpenAI-compatible endpoint
-    (PLANNER_BASE, key from $PLANNER_KEY_ENV, default OPENAI_API_KEY)."""
-    model = os.environ.get("PLANNER_MODEL")
-    if not model:
-        return default
-    key_env = os.environ.get("PLANNER_KEY_ENV", "OPENAI_API_KEY")
+DEFAULT_PLANNER_MODEL = "gpt-5.6-sol"
+
+
+def planner_from_env(default: L2Client, max_inflight: int = 8) -> L2Client | None:
+    """Returns the planner client, or None to let L2 plan.
+
+    PLANNER_MODEL="" / "none" forces L2 planning. Unset -> gpt-5.6-sol if an OpenAI
+    key resolves (env or bundled file), else L2. Key comes from $PLANNER_KEY_ENV
+    (default OPENAI_API_KEY), falling back to the bundled file."""
+    model = os.environ.get("PLANNER_MODEL", DEFAULT_PLANNER_MODEL).strip()
+    if not model or model.lower() in ("none", "l2", "off"):
+        return None
+    key = resolve_key(os.environ.get("PLANNER_KEY_ENV", "OPENAI_API_KEY"))
+    if not key:
+        return None
+    # Fail fast: if the endpoint is unreachable from the eval box, L2 must take
+    # over within seconds, not after a minute of backoff.
     return L2Client(
-        os.environ.get("PLANNER_BASE", "https://api.openai.com"),
-        os.environ.get(key_env, ""),
-        model,
-        max_inflight=max_inflight,
+        os.environ.get("PLANNER_BASE", "https://api.openai.com"), key, model,
+        max_inflight=max_inflight, timeout=45.0, retries=2,
     )
 
 
@@ -384,8 +418,18 @@ def answer(client: L2Client, messages: list[dict], *, temperature: float = 0.3,
     """Full turn. Returns {'answer', 'plan', 'notes', 'timings'}. The final text is
     always L2's; `planner` (if given) only produces the brief."""
     t0 = time.time()
-    plan = make_plan(planner or client, messages)
-    plan["_planner_model"] = (planner or client).model
+    plan: dict | None = None
+    if planner is not None:
+        try:
+            plan = make_plan(planner, messages)
+            plan["_planner_model"] = planner.model
+        except Exception:  # unreachable endpoint, bad key, ... -> L2 plans instead
+            plan = None
+    if plan is None or plan.get("_fallback"):
+        l2_plan = make_plan(client, messages)
+        l2_plan["_planner_model"] = client.model
+        if plan is None or not l2_plan.get("_fallback"):
+            plan = l2_plan
     t1 = time.time()
     draft, retried = generate(client, messages, plan, temperature=temperature, max_tokens=max_tokens)
     t2 = time.time()

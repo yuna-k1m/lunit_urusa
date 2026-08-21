@@ -5,6 +5,9 @@ reference
 results
 docs
 tools
+tests
 .env*
 __pycache__
 *.pyc
+*.part
+*.bad
