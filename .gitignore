@@ -1,5 +1,16 @@
-#data/
+# large / fetched assets are never committed - see AGENTS.md
+# pull them with: python tools/fetch_data.py
+data/*
+!data/.gitkeep
+reference/
+
 .venv/
 __pycache__/
 *.pyc
-#healthbench_sample.json
+*.part
+*.bad
+healthbench_sample.json
+
+# editors
+.idea/
+.vscode/

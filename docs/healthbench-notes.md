@@ -6,7 +6,21 @@ holdout test set defined by the organizers** — not on these public files — b
 the same format and rubric machinery, so they are the right thing to develop and self-evaluate
 against.
 
-## 1. What's on disk
+## 1. Getting the data
+
+Nothing here is committed — no git-lfs. Everything is declared in `tools/assets.json` and pulled by
+the manifest fetcher (stdlib only, resumable, SHA-256 verified). See `AGENTS.md` for the full
+tooling description.
+
+```bash
+python tools/fetch_data.py fetch healthbench          # core sets, ~105 MB
+python tools/fetch_data.py fetch healthbench-extra    # meta-eval, +130 MB
+python tools/fetch_data.py fetch grader               # official grader source
+python tools/fetch_data.py status                     # what's present
+python tools/fetch_data.py verify                     # re-hash against the manifest
+```
+
+What that lands:
 
 ```
 data/healthbench/
@@ -18,24 +32,18 @@ reference/simple-evals/
   healthbench_eval.py       official grader + scoring formula
   healthbench_meta_eval.py  grader-vs-physician agreement eval
   common.py, types.py       supporting code
-tools/hb.py                 local explorer CLI (see §6)
+tools/hb.py                 local explorer CLI (see section 6)
 ```
 
-Source URLs (public Azure blob, no auth):
-
-```
-https://openaipublic.blob.core.windows.net/simple-evals/healthbench/2025-05-07-06-14-12_oss_eval.jsonl
-https://openaipublic.blob.core.windows.net/simple-evals/healthbench/hard_2025-05-08-21-00-10.jsonl
-https://openaipublic.blob.core.windows.net/simple-evals/healthbench/consensus_2025-05-09-20-00-46.jsonl
-https://openaipublic.blob.core.windows.net/simple-evals/healthbench/2025-05-07-06-14-12_oss_meta_eval.jsonl
-```
-
-Grader source: `https://raw.githubusercontent.com/openai/simple-evals/main/healthbench_eval.py`
-
-`hard` and `consensus` are both **strict subsets of `full`** (verified by `prompt_id`).
+Upstream URLs (public Azure blob, no auth) are recorded in `tools/assets.json` along with the
+pinned SHA-256 of each file. The grader sources come from
+`https://raw.githubusercontent.com/openai/simple-evals/main/` and are intentionally **unpinned**,
+since they track `main`.
 
 Every row carries a `canary` string (`healthbench:26b5c67b-...`). Keep it — it exists so the data
 can be detected in training corpora. Don't strip it and don't publish model outputs alongside it.
+
+`hard` and `consensus` are both **strict subsets of `full`** (verified by `prompt_id`).
 
 ## 2. Record format (full / hard / consensus)
 
