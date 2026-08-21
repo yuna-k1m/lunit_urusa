@@ -37,22 +37,25 @@ and `/v1/chat/completions` returned 503. That isolated credential availability a
 
 ## The working configuration
 
-The successful submission keeps `submission_api_key` as a tracked file and copies it into the
-image:
+The submission keeps the credentials as tracked files and copies them into the image:
 
 ```dockerfile
-COPY app.py submission_api_key ./
+COPY submission_api_key submission_openai_key ./
+COPY app ./app
 ```
 
-At runtime, the application resolves the credential in this order:
+At runtime, `app/engine.py:resolve_key` resolves each credential in this order:
 
-1. Use `LUNIT_FM_API_KEY` when it is present.
-2. Otherwise read `/app/submission_api_key`.
-3. Return a clear server error if neither source is available.
+1. The environment variable (`LUNIT_FM_API_KEY` / `OPENAI_API_KEY`) when present.
+2. Otherwise the bundled file (`/app/submission_api_key` / `/app/submission_openai_key`).
 
-This preserves local and managed-secret overrides while allowing CoEval to run without injecting a
-runtime secret. `submission_api_key` is part of the submission contract for this repository: do
-not delete it or remove it from the Docker `COPY` instruction.
+`submission_api_key` (Lunit) is required. `submission_openai_key` powers the planner
+(`gpt-5.6-sol`); if it is missing or the endpoint is unreachable from the evaluator, the driver
+falls back to L2-only planning automatically rather than failing. Both files are part of the
+submission contract for this repository: do not delete them or remove them from the Docker `COPY`.
+
+> Since 2026-08-21 the server is the `app/` package (`uvicorn app.main:app`), not a root `app.py`.
+> A root `app.py` must not be reintroduced: it shadows the package import.
 
 Because a tracked credential is visible in Git history and the built image, use a dedicated,
 short-lived hackathon key and rotate it after evaluation. Never include its value in documentation,
@@ -109,8 +112,9 @@ startup failure.
 
 1. Start a focused branch from the latest `lunit/hackathon-submission`.
 2. Run the `linux/amd64` build and contract tests above.
-3. Verify that `submission_api_key` exists in the Git tree and is non-empty without displaying it.
-4. Verify that the Dockerfile copies the key and the application retains the file fallback.
+3. Verify that `submission_api_key` and `submission_openai_key` exist in the Git tree and are
+   non-empty without displaying them (`tests/test_api.py` checks this).
+4. Verify that the Dockerfile copies both keys and the application retains the file fallback.
 5. Open and merge a pull request into `lunit/hackathon-submission`.
 6. Fetch the remote branch and obtain its full SHA:
 

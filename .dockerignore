@@ -1,10 +1,13 @@
 .git
 .venv
+data
+reference
+results
+docs
+tools
+tests
+.env*
 __pycache__
 *.pyc
 *.part
 *.bad
-data
-reference
-tests
-

@@ -113,6 +113,7 @@ tools/
 docs/
   lunit-hackathon-brief.md   platform reference: MCP tools, L2 two-stage model, submission rules
   healthbench-notes.md       benchmark format, exact scoring formula, composition stats
+  baseline-results.md        measured raw-model floors + run log
   healthbench-themes/        gitignored; one readable .md per problem type (generated)
 data/                        gitignored; populated by fetch_data.py
 reference/simple-evals/      official grader source (fetched, gitignored)
@@ -176,6 +177,37 @@ regenerating produces no spurious diffs.
 Output is **gitignored** — it reproduces benchmark text verbatim and that data carries a canary
 string. Everyone regenerates locally from the committed script.
 
+### Running an eval
+
+```bash
+python tools/run_eval.py --n 20                    # raw gpt-4.1 on 20 hard examples
+python tools/run_eval.py --n 50 --split full
+python tools/run_eval.py --n 20 --dry-run          # just count the calls
+```
+
+Reimplements `calculate_score` exactly and pulls `GRADER_TEMPLATE` verbatim out of
+`reference/simple-evals/healthbench_eval.py` at runtime, so the grading prompt can't drift from
+upstream. `--mode raw` is the no-harness floor: one completion, system message
+"You are a helpful assistant.", temperature 0.5, max_tokens 2048 — the same config simple-evals
+uses for its published numbers.
+
+Points at any OpenAI-compatible endpoint, so the same script grades an L2 harness once one exists:
+
+```bash
+python tools/run_eval.py --candidate-base https://model.hackathon.lunit.io     --candidate-key-env LUNIT_FM_API_KEY --model Lunit/L2-preview --n 20
+```
+
+Output goes to `results/<name>/` (gitignored): `results.jsonl` with every rubric grade and the
+grader's explanation, plus `summary.json`. Cost is printed per run.
+
+**Measured baselines** — full detail, methodology, and run log in
+[`docs/baseline-results.md`](docs/baseline-results.md).
+
+Raw `Lunit/L2-preview` on HealthBench Hard, n=200, seed 0, gpt-4.1 grader: **0.190**
+(95% CI [0.145, 0.238]). 46% of positive rubrics met, 44% of negative rubrics fired; zeroing the
+penalties alone would take it to 0.458. The penalty mass is concentrated in two behaviors —
+escalating emergencies and deciding whether context is missing — neither of which needs retrieval.
+
 Develop against `hard` (1,000 examples) — it's the discriminating subset and cheap to re-grade.
 The organizers score the final submission on **their own holdout**, not these files.
 
@@ -208,6 +240,9 @@ serves on `0.0.0.0:8000`, OpenAI-compatible with at least `GET /v1/models` and
 
 - **Never commit anything from `data/`** or `reference/`. If you need a new large file, register it
   with `fetch_data.py add`.
+- **Do not delete `submission_api_key`.** CoEval does not inject `LUNIT_FM_API_KEY` at runtime, so
+  this tracked fallback credential must remain in the repository and must continue to be copied
+  into the submitted Docker image. Runtime `LUNIT_FM_API_KEY` may override it when available.
 - `tools/*.py` are stdlib-only on purpose — they must run before any dependency install.
 - The evaluation environment has **no external network**. Anything `fetch_data.py` pulls is a
   development-time convenience; the submitted container must not depend on it at runtime.
