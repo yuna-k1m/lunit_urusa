@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from fastapi.testclient import TestClient
 
-from app import DEFAULT_MODEL, app
+from app import DEFAULT_MODEL, app, get_api_key
 
 
 class ApiContractTest(unittest.TestCase):
@@ -25,13 +25,27 @@ class ApiContractTest(unittest.TestCase):
         self.assertEqual(response.json()["error"]["type"], "invalid_request_error")
 
     def test_chat_requires_server_key(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "app.DEFAULT_API_KEY_FILE"
+        ) as key_file:
+            key_file.read_text.side_effect = FileNotFoundError
             response = self.client.post(
                 "/v1/chat/completions",
                 json={"messages": [{"role": "user", "content": "Hello"}]},
             )
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.json()["error"]["type"], "server_error")
+
+    def test_api_key_prefers_environment(self) -> None:
+        with patch.dict(os.environ, {"LUNIT_FM_API_KEY": "runtime-key"}, clear=True):
+            self.assertEqual(get_api_key(), "runtime-key")
+
+    def test_api_key_falls_back_to_submission_file(self) -> None:
+        with patch.dict(os.environ, {}, clear=True), patch(
+            "app.DEFAULT_API_KEY_FILE"
+        ) as key_file:
+            key_file.read_text.return_value = "file-key\n"
+            self.assertEqual(get_api_key(), "file-key")
 
     def test_chat_forwards_full_history_and_pins_model(self) -> None:
         messages = [
