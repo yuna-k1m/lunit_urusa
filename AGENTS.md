@@ -117,7 +117,121 @@ docs/
   healthbench-themes/        gitignored; one readable .md per problem type (generated)
 data/                        gitignored; populated by fetch_data.py
 reference/simple-evals/      official grader source (fetched, gitignored)
+benchmark/
+  run_healthbench.py         older endpoint-oriented fixed-100 runner
 ```
+
+---
+
+## Creating a new chat model (harness)
+
+The FastAPI transport is deliberately separate from model behavior. A harness is a strategy that
+implements `ChatStrategy.complete()` and is selected at runtime with `MODEL_STRATEGY`; do not fork
+`app.py` for each experiment.
+
+Current model names:
+
+| `MODEL_STRATEGY` | Implementation | Purpose |
+| --- | --- | --- |
+| `baseline_l2` | `DirectL2Strategy` | Canonical bare-L2 benchmark baseline |
+| `direct_l2` | `DirectL2Strategy` | Backward-compatible baseline alias |
+| `siusiubeom_h4` | `SiusiubeomH4Strategy` | Sol/L2 planner → L2 writer → structural assembler |
+| `siusiubeom` | `SiusiubeomH4Strategy` | Short alias for `siusiubeom_h4` |
+| `multi_patient_sol` | `MultiPatientStrategy` | Sol profiles → N parallel L2 answers → Sol final answer |
+| `multi_patient` | `MultiPatientStrategy` | Alias for the Sol-final multi-patient pipeline |
+| `demographics_sol` | `DemographicsStrategy` | Fixed demographic personas → N L2 answers → Sol medical synthesis |
+| `demographics` | `DemographicsStrategy` | Alias for the fixed-persona demographic pipeline |
+| `patient-sim` | `PatientSimStrategy` | Patient simulator → Sol intake prep → L2 diagnosis → Sol final answer |
+| `patient_sim` | `PatientSimStrategy` | Underscore alias for the patient-simulator pipeline |
+
+To add a harness:
+
+1. Add `chat_models/<name>.py` with a class satisfying `chat_models.base.ChatStrategy`. Accept a
+   `ChatRequest`, preserve the complete `messages` history, and return a `ChatResult`.
+2. Put reusable HTTP integrations in `clients/`, shared orchestration in `pipeline/`, and prompt text
+   in `prompts/`. Keep API calls out of `app/main.py`.
+3. Register a stable public name in `build_registry()` in `chat_models/factory.py`. The incoming request's `model`
+   field does not select the implementation; `MODEL_STRATEGY` does.
+4. Read knobs and credentials through `Settings` in `config.py`. Environment variables override the
+   bundled `submission_api_key` and `submission_openai_key` files. Never log either value.
+5. Define explicit timeout, concurrency, partial-failure, and fallback behavior. A fallback must be
+   observable in tests; do not infer success merely from HTTP 200.
+6. Add mocked tests under `tests/` for API shape, multi-turn preservation, failures, and concurrency.
+   Tests must not call paid or Lunit-network services.
+7. If the harness adds a package needed at runtime, copy it in the root `Dockerfile`, then run:
+
+   ```bash
+   python -m unittest discover -s tests -v
+   docker build -t urusa-harness:local .
+   docker run --rm urusa-harness:local \
+     python -c 'from fastapi.testclient import TestClient; from app.main import app; assert TestClient(app).get("/v1/models").status_code == 200'
+   ```
+
+The selected multi-patient strategy uses Sol to synthesize the final user-facing answer from the
+parallel L2 candidate answers.
+
+---
+
+## Unified local HealthBench benchmark
+
+The repository benchmark is **exactly 100 HealthBench Hard examples** selected by sorting the pinned
+dataset's `prompt_id` values lexicographically and taking the first 100. UUID ordering makes this a
+stable, order-independent sample. Do not change the selection while comparing harnesses.
+
+`tools/run_eval.py` is the canonical runner for raw APIs, the legacy engine, and every registered
+chat strategy. In strategy mode it instantiates the same registry used by the server, sends the
+complete HealthBench conversation unchanged, grades each rubric independently with the official
+`GRADER_TEMPLATE`, applies negative points, and clips only the final mean. Results contain benchmark
+text and model answers, remain under gitignored `results/`, and must not be published.
+
+Fetch the pinned Hard split and the official grader source:
+
+```bash
+python tools/fetch_data.py fetch healthbench-hard
+python tools/fetch_data.py fetch grader
+```
+
+Run the canonical fixed 100 with GPT-5.6 Sol as the grader:
+
+```bash
+python tools/run_eval.py \
+  --mode strategy \
+  --strategy multi_patient_sol \
+  --subset fixed100 \
+  --grader gpt-5.6-sol \
+  --grader-api responses \
+  --jobs 4 \
+  --name multi_patient_sol-fixed100 \
+  --resume
+```
+
+Compare models by changing only `--strategy` and `--name`:
+
+```bash
+python tools/run_eval.py --mode strategy --strategy baseline_l2 \
+  --subset fixed100 --grader gpt-5.6-sol --grader-api responses \
+  --name baseline_l2-fixed100 --resume
+
+python tools/run_eval.py --mode strategy --strategy siusiubeom_h4 \
+  --subset fixed100 --grader gpt-5.6-sol --grader-api responses \
+  --name siusiubeom_h4-fixed100 --resume
+```
+
+Selection and comparison rules:
+
+- `--subset fixed100` ignores `--n` and always selects the lexicographically smallest 100 prompt
+  IDs from the pinned Hard dataset.
+- Keep the subset, grader, grader API, reasoning effort, temperature, and jobs identical in a model
+  comparison.
+- `--resume` skips prompt IDs already present in that named run's `results.jsonl`.
+- `--mode raw` preserves the published simple-evals-style floor. `--mode harness` preserves direct
+  legacy `app.engine` experiments; new comparisons use `--mode strategy`.
+- Use `--dry-run` before large paid runs. Candidate token cost for composed strategies is not fully
+  observable, so its estimate is a lower bound.
+
+This local score uses GPT-5.6 Sol because that is the team's chosen development grader. The official
+holdout evaluator may differ, so treat the result as a directional comparison, not a leaderboard
+prediction.
 
 ---
 
@@ -179,26 +293,9 @@ string. Everyone regenerates locally from the committed script.
 
 ### Running an eval
 
-```bash
-python tools/run_eval.py --n 20                    # raw gpt-4.1 on 20 hard examples
-python tools/run_eval.py --n 50 --split full
-python tools/run_eval.py --n 20 --dry-run          # just count the calls
-```
-
-Reimplements `calculate_score` exactly and pulls `GRADER_TEMPLATE` verbatim out of
-`reference/simple-evals/healthbench_eval.py` at runtime, so the grading prompt can't drift from
-upstream. `--mode raw` is the no-harness floor: one completion, system message
-"You are a helpful assistant.", temperature 0.5, max_tokens 2048 — the same config simple-evals
-uses for its published numbers.
-
-Points at any OpenAI-compatible endpoint, so the same script grades an L2 harness once one exists:
-
-```bash
-python tools/run_eval.py --candidate-base https://model.hackathon.lunit.io     --candidate-key-env LUNIT_FM_API_KEY --model Lunit/L2-preview --n 20
-```
-
-Output goes to `results/<name>/` (gitignored): `results.jsonl` with every rubric grade and the
-grader's explanation, plus `summary.json`. Cost is printed per run.
+Use the unified procedure above. `tools/run_eval.py --help` lists raw endpoint, legacy harness,
+registered strategy, sample/slice, grader API, concurrency, dry-run, and resume controls. Output is
+`results/<name>/results.jsonl` plus `summary.json`.
 
 **Measured baselines** — full detail, methodology, and run log in
 [`docs/baseline-results.md`](docs/baseline-results.md).

@@ -3,8 +3,12 @@
 data
 reference
 results
+resources/*.part
 docs
 tools
+!tools/
+tools/*
+!tools/run_eval.py
 tests
 .env*
 __pycache__

@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
-"""Run a HealthBench evaluation locally and score it with the official rubric grader.
+"""Run registered chat strategies or raw APIs on HealthBench and grade them.
 
-Baseline sanity check before any L2 harness exists. `--mode raw` is the honest
-floor: one chat completion, no retrieval, no prompt engineering, exactly the
-config simple-evals uses for its published numbers (system message "You are a
-helpful assistant.", temperature 0.5, max_tokens 2048).
+Strategy mode is the standard comparison path and defaults to the canonical,
+UUID-ordered fixed 100 from HealthBench Hard. Raw and legacy harness modes remain
+available to reproduce earlier measurements.
 
-    python tools/run_eval.py --n 20                       # raw gpt-4.1 on 20 hard examples
-    python tools/run_eval.py --n 50 --split full
-    python tools/run_eval.py --model gpt-4.1-mini --grader gpt-4.1-mini --n 10
-    python tools/run_eval.py --mode raw --candidate-base https://model.hackathon.lunit.io \\
-        --candidate-key-env LUNIT_FM_API_KEY --model Lunit/L2-preview --n 20
+    python tools/run_eval.py --strategy baseline_l2 --grader gpt-5.6-sol --resume
+    python tools/run_eval.py --strategy siusiubeom_h4 --grader gpt-5.6-sol --resume
+    python tools/run_eval.py --strategy multi_patient_sol --grader gpt-5.6-sol --jobs 4 --resume
+    python tools/run_eval.py --mode raw --subset tune --n 20 --model gpt-4.1 --grader gpt-4.1
 
 Scoring is `healthbench_eval.calculate_score` reimplemented exactly:
 positives-only denominator, per-example score unclipped, final mean clipped to
 [0,1]. Grader prompt is GRADER_TEMPLATE verbatim.
 
-Reads OPENAI_API_KEY from the environment or a .env file at the repo root.
-Stdlib only. Results land in results/<run-name>/.
+Credentials resolve from the environment/.env; GPT Sol grading can also use the
+bundled submission_openai_key. Strategy mode uses the same registry and bundled
+credential fallbacks as the server. Results land in results/<run-name>/.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import collections
 import json
 import os
@@ -56,6 +56,7 @@ API_GATE = threading.Semaphore(8)
 
 # per-1M-token USD, for the cost estimate only
 PRICES = {
+    "gpt-5.6-sol": (5.00, 30.00),
     "gpt-4.1": (2.00, 8.00),
     "gpt-4.1-mini": (0.40, 1.60),
     "gpt-4.1-nano": (0.10, 0.40),
@@ -105,7 +106,14 @@ def is_non_latin(ex: dict, frac: float = 0.10) -> bool:
 
 
 def pick_sample(rows: list[dict], subset: str, n: int, seed: int, slice_: str) -> list[dict]:
-    if subset == "tune":
+    if subset == "conquer_val":
+        ids = set(json.loads((ROOT / "tools" / "conquer_val_ids.json").read_text(encoding="utf-8"))["prompt_ids"])
+        pool = [x for x in rows if x["prompt_id"] in ids]
+    elif subset == "fixed100":
+        if len(rows) < 100:
+            raise ValueError("fixed100 requires at least 100 rows")
+        pool = sorted(rows, key=lambda row: row["prompt_id"])[:100]
+    elif subset == "tune":
         pool = random.Random(TUNE_SEED).sample(rows, TUNE_N)
     elif subset == "val":
         tune_ids = {x["prompt_id"] for x in random.Random(TUNE_SEED).sample(rows, TUNE_N)}
@@ -117,7 +125,9 @@ def pick_sample(rows: list[dict], subset: str, n: int, seed: int, slice_: str) -
         pool = [x for x in pool if is_non_latin(x)]
     elif slice_ == "multiturn":
         pool = [x for x in pool if len(x["prompt"]) > 1]
-    if n >= len(pool):
+    elif slice_ == "longturn":
+        pool = [x for x in pool if len(x["prompt"]) >= 6]
+    if subset == "fixed100" or n >= len(pool):
         return pool
     return random.Random(seed).sample(pool, n)
 
@@ -223,6 +233,76 @@ def parse_grade(text: str) -> dict:
         return {}
 
 
+def responses_grade(
+    base: str,
+    key: str,
+    model: str,
+    prompt: str,
+    *,
+    reasoning_effort: str,
+    usage: Usage,
+    retries: int = 5,
+) -> dict:
+    """Grade with the Responses API and a strict HealthBench verdict schema."""
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "explanation": {"type": "string"},
+            "criteria_met": {"type": "boolean"},
+        },
+        "required": ["explanation", "criteria_met"],
+    }
+    body = json.dumps({
+        "model": model,
+        "input": prompt,
+        "reasoning": {"effort": reasoning_effort},
+        "text": {"format": {
+            "type": "json_schema", "name": "healthbench_rubric_grade",
+            "strict": True, "schema": schema,
+        }},
+        "store": False,
+    }).encode()
+    req = urllib.request.Request(
+        f"{base.rstrip('/')}/v1/responses",
+        data=body,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+    )
+    delay = 2.0
+    for attempt in range(retries):
+        try:
+            with API_GATE:
+                with urllib.request.urlopen(req, timeout=180) as response:
+                    data = json.loads(response.read())
+            token_usage = data.get("usage") or {}
+            usage.add(token_usage.get("input_tokens", 0), token_usage.get("output_tokens", 0))
+            text = data.get("output_text")
+            if not text:
+                for item in data.get("output", []):
+                    for content in item.get("content", []):
+                        if content.get("type") == "output_text":
+                            text = content.get("text")
+                            break
+            grade = parse_grade(text or "")
+            if isinstance(grade.get("criteria_met"), bool):
+                return grade
+            raise ValueError("grader returned no boolean criteria_met")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")[:300]
+            if exc.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
+                time.sleep(min(delay, 60.0))
+                delay *= 2
+                continue
+            raise RuntimeError(f"HTTP {exc.code} from {model}: {detail}") from exc
+        except (OSError, ValueError) as exc:
+            if attempt < retries - 1:
+                time.sleep(min(delay, 60.0))
+                delay *= 2
+                continue
+            raise RuntimeError(f"{model}: {exc}") from exc
+    raise RuntimeError(f"{model}: exhausted {retries} retries")
+
+
 # ------------------------------------------------------------------------ score
 
 
@@ -251,16 +331,22 @@ def main() -> int:
     p.add_argument("--split", default="hard", choices=["hard", "full", "consensus"])
     p.add_argument("--n", type=int, default=20, help="examples to sample")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--mode", default="raw", choices=["raw", "harness"],
-                   help="raw = one completion with a system prompt; harness = app.engine (plan -> generate -> assemble)")
+    p.add_argument("--mode", default="strategy", choices=["raw", "harness", "strategy"],
+                   help="strategy = registered chat model (standard); raw = one API call; harness = legacy app.engine")
+    p.add_argument("--strategy", default="baseline_l2",
+                   help="registered model name used by --mode strategy")
     p.add_argument("--system", default=None,
                    help="path to a system prompt file (default: the simple-evals baseline message)")
-    p.add_argument("--subset", default="all", choices=["all", "tune", "val"],
-                   help="tune = frozen 200 the baseline was measured on; val = disjoint 200")
-    p.add_argument("--slice", default="all", choices=["all", "nonlatin", "multiturn"],
+    p.add_argument("--subset", default="fixed100", choices=["all", "fixed100", "tune", "val", "conquer_val"],
+                   help="fixed100 = canonical UUID-ordered 100; tune/val = frozen disjoint 200s; "
+                        "conquer_val = the 301 published leaderboard ids (needs --split full)")
+    p.add_argument("--slice", default="all", choices=["all", "nonlatin", "multiturn", "longturn"],
                    help="filter the pool before sampling")
     p.add_argument("--model", default="gpt-4.1", help="candidate model")
     p.add_argument("--grader", default="gpt-4.1", help="grader model")
+    p.add_argument("--grader-api", default="auto", choices=["auto", "chat", "responses"],
+                   help="auto uses Responses for gpt-5.6 and Chat Completions otherwise")
+    p.add_argument("--grader-reasoning-effort", default="medium")
     p.add_argument("--candidate-base", default="https://api.openai.com")
     p.add_argument("--candidate-key-env", default="OPENAI_API_KEY")
     p.add_argument("--grader-base", default="https://api.openai.com")
@@ -269,9 +355,9 @@ def main() -> int:
                    help="harness mode: model that writes the plan (default: the candidate itself)")
     p.add_argument("--planner-base", default="https://api.openai.com")
     p.add_argument("--planner-key-env", default="OPENAI_API_KEY")
-    p.add_argument("--jobs", type=int, default=8)
+    p.add_argument("--jobs", type=int, default=12)
     p.add_argument("--temperature", type=float, default=0.5)
-    p.add_argument("--max-tokens", type=int, default=2048)
+    p.add_argument("--max-tokens", type=int, default=4096)
     p.add_argument("--name", default=None, help="results subdirectory name")
     p.add_argument("--resume", action="store_true",
                    help="skip prompt_ids already present in the run's results.jsonl")
@@ -283,15 +369,22 @@ def main() -> int:
     load_dotenv()
     cand_key = os.environ.get(args.candidate_key_env)
     grade_key = os.environ.get(args.grader_key_env)
-    if not args.dry_run and not (cand_key and grade_key):
+    if not grade_key and (ROOT / "submission_openai_key").exists():
+        grade_key = (ROOT / "submission_openai_key").read_text(encoding="utf-8").strip()
+        if grade_key.startswith("b64:"):
+            import base64
+            grade_key = base64.b64decode(grade_key[4:]).decode().strip()
+    candidate_key_required = args.mode == "raw"
+    if not args.dry_run and (not grade_key or (candidate_key_required and not cand_key)):
         sys.exit(
-            f"missing ${args.candidate_key_env} / ${args.grader_key_env} "
-            "(put it in .env at the repo root)"
+            f"missing required ${args.candidate_key_env} / ${args.grader_key_env} credentials"
         )
 
     rows = load_split(args.split)
-    if args.subset != "all" and args.split != "hard":
-        sys.exit("--subset tune/val are defined on --split hard only")
+    if args.subset in ("fixed100", "tune", "val") and args.split != "hard":
+        sys.exit("--subset fixed100/tune/val are defined on --split hard only")
+    if args.subset == "conquer_val" and args.split != "full":
+        sys.exit("--subset conquer_val needs --split full")
     sample = pick_sample(rows, args.subset, args.n, args.seed, args.slice)
     n_rubrics = sum(len(x["rubrics"]) for x in sample)
     system_prompt = (
@@ -301,8 +394,12 @@ def main() -> int:
     print(f"split={args.split}  subset={args.subset}  slice={args.slice}  "
           f"n={len(sample)}  rubrics={n_rubrics}")
     print(f"system={'baseline' if not args.system else args.system} ({len(system_prompt)} chars)")
-    print(f"candidate={args.model} @ {args.candidate_base}   mode={args.mode}")
-    print(f"grader={args.grader} @ {args.grader_base}")
+    candidate_label = args.strategy if args.mode == "strategy" else args.model
+    print(f"candidate={candidate_label} @ {args.candidate_base}   mode={args.mode}")
+    grader_api = args.grader_api
+    if grader_api == "auto":
+        grader_api = "responses" if args.grader.startswith("gpt-5.6") else "chat"
+    print(f"grader={args.grader} @ {args.grader_base} ({grader_api})")
 
     template = grader_template()
 
@@ -319,14 +416,14 @@ def main() -> int:
                 g_in += tpl_tok + convo_tok + ans_tok + len(r["criterion"]) / 4
                 g_out += 95  # measured mean of the grader's JSON verdict
         c_out = len(sample) * ans_tok
-        ci, co = price_of(args.model)
+        ci, co = (0.0, 0.0) if args.mode == "strategy" else price_of(args.model)
         gi, go = price_of(args.grader)
         cost = (c_in * ci + c_out * co + g_in * gi + g_out * go) / 1e6
         print(f"\nwould make {len(sample):,} completion + {n_rubrics:,} grading calls")
-        print(f"  candidate  ~{c_in / 1e6:.2f}M in / {c_out / 1e6:.2f}M out   ({args.model})")
+        print(f"  candidate  ~{c_in / 1e6:.2f}M in / {c_out / 1e6:.2f}M out   ({candidate_label})")
         print(f"  grader     ~{g_in / 1e6:.2f}M in / {g_out / 1e6:.2f}M out   ({args.grader})")
         print(f"  estimated cost  ~${cost:,.2f}"
-              + ("" if any(price_of(m) != (0.0, 0.0) for m in (args.model, args.grader))
+              + ("" if any(price_of(m) != (0.0, 0.0) for m in (candidate_label, args.grader))
                  else "  (no price table entry - grader/candidate assumed free)"))
         print(f"  assuming {args.assume_answer_chars} chars per answer; "
               f"at --jobs {args.jobs} expect roughly "
@@ -337,6 +434,7 @@ def main() -> int:
     done = [0]
 
     engine_client = None
+    strategy_factory = None
     if args.mode == "harness":
         sys.path.insert(0, str(ROOT))
         from app import engine  # noqa: E402
@@ -351,6 +449,17 @@ def main() -> int:
                 args.planner_model, max_inflight=args.jobs,
             )
             print(f"planner={args.planner_model} @ {args.planner_base}")
+    elif args.mode == "strategy":
+        sys.path.insert(0, str(ROOT))
+        from chat_models.base import ChatRequest as FrameworkChatRequest  # noqa: E402
+        from chat_models.factory import build_registry  # noqa: E402
+        from config import Settings  # noqa: E402
+
+        def strategy_factory():
+            return build_registry(Settings.from_env()).create(args.strategy)
+
+        # Fail before starting paid grading if the name is invalid.
+        strategy_factory()
     lock = threading.Lock()
 
     # Global in-flight cap. The example pool and the per-rubric pool are nested, so
@@ -359,7 +468,7 @@ def main() -> int:
     API_GATE = threading.Semaphore(args.jobs)
 
     run_name = args.name or (
-        f"{datetime.now():%Y%m%d-%H%M%S}-{args.mode}-{args.model}-{args.split}{len(sample)}"
+        f"{datetime.now():%Y%m%d-%H%M%S}-{args.mode}-{candidate_label}-{args.split}{len(sample)}"
     )
     outdir = ROOT / "results" / run_name.replace("/", "_")
     outdir.mkdir(parents=True, exist_ok=True)
@@ -378,14 +487,24 @@ def main() -> int:
 
     def run_example(ex: dict) -> dict:
         convo = [dict(m) for m in ex["prompt"]]
+        if args.subset == "conquer_val":
+            convo = [{"role": "system", "content": "You are Chain-of-Evidence"}] + convo
         harness_meta = None
-        if engine_client is not None:
+        if strategy_factory is not None:
+            strategy = strategy_factory()
+            result = asyncio.run(strategy.complete(FrameworkChatRequest(
+                messages=convo,
+                original_payload={"temperature": args.temperature, "max_tokens": args.max_tokens},
+            )))
+            answer = result.content
+            harness_meta = result.metadata
+        elif engine_client is not None:
             out = engine.answer(
                 engine_client, convo, temperature=args.temperature, max_tokens=args.max_tokens,
                 planner=planner_client,
-            )
+            )  # None -> engine default (6000)
             answer = out["answer"]
-            harness_meta = {k: out.get(k) for k in ("plan", "notes", "timings", "review")}
+            harness_meta = {k: out.get(k) for k in ("plan", "notes", "timings", "review", "retrieval", "selection", "search")}
         else:
             messages = [{"role": "system", "content": system_prompt}] + convo
             answer = chat(
@@ -394,7 +513,7 @@ def main() -> int:
                 args.model,
                 messages,
                 temperature=args.temperature,
-                max_tokens=args.max_tokens,
+                max_tokens=args.max_tokens or 2048,
                 usage=cand_usage,
             )
         with_response = convo + [{"role": "assistant", "content": answer}]
@@ -404,19 +523,20 @@ def main() -> int:
             prompt = template.replace("<<conversation>>", convo_str).replace(
                 "<<rubric_item>>", f"[{r['points']}] {r['criterion']}"
             )
-            for _ in range(3):
-                out = chat(
-                    args.grader_base,
-                    grade_key,
-                    args.grader,
-                    [{"role": "user", "content": prompt}],
-                    temperature=args.temperature,
-                    max_tokens=1024,
-                    usage=grade_usage,
+            if grader_api == "responses":
+                return responses_grade(
+                    args.grader_base, grade_key, args.grader, prompt,
+                    reasoning_effort=args.grader_reasoning_effort, usage=grade_usage,
                 )
-                g = parse_grade(out)
-                if isinstance(g.get("criteria_met"), bool):
-                    return g
+            for _ in range(3):
+                output = chat(
+                    args.grader_base, grade_key, args.grader,
+                    [{"role": "user", "content": prompt}], temperature=args.temperature,
+                    max_tokens=1024, usage=grade_usage,
+                )
+                grade_result = parse_grade(output)
+                if isinstance(grade_result.get("criteria_met"), bool):
+                    return grade_result
             return {"criteria_met": False, "explanation": "grader failed to return valid JSON"}
 
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
@@ -495,7 +615,7 @@ def main() -> int:
             if s is not None:
                 axis_scores[axis].append(s)
 
-    ci, co = price_of(args.model)
+    ci, co = (0.0, 0.0) if args.mode == "strategy" else price_of(args.model)
     gi, go = price_of(args.grader)
     cost = (
         cand_usage.inp * ci + cand_usage.out * co + grade_usage.inp * gi + grade_usage.out * go
@@ -505,7 +625,7 @@ def main() -> int:
     # summary is emitted here.
     summary = {
         "mode": args.mode,
-        "candidate_model": args.model,
+        "candidate_model": candidate_label,
         "planner_model": args.planner_model if args.mode == "harness" else None,
         "grader_model": args.grader,
         "split": args.split,
@@ -533,7 +653,7 @@ def main() -> int:
     )
 
     print("\n" + "=" * 62)
-    print(f"OVERALL  {overall:.3f}   ({args.mode} {args.model} on {args.split}, n={len(sample)})")
+    print(f"OVERALL  {overall:.3f}   ({args.mode} {candidate_label} on {args.split}, n={len(sample)})")
     print("=" * 62)
     print(f"  mean (unclipped) {statistics.mean(scores):+.3f}   median {statistics.median(scores):+.3f}")
     print(f"  range {min(scores):+.3f} .. {max(scores):+.3f}   negative examples {summary['negative_examples']}/{len(scores)}")

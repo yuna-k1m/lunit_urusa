@@ -37,6 +37,18 @@ and `/v1/chat/completions` returned 503. That isolated credential availability a
 
 ## The working configuration
 
+The current submitted image selects the L2-final, local-first configuration
+explicitly because CoEval does not inject runtime environment variables:
+
+```dockerfile
+ENV MODEL_STRATEGY=siusiubeom_h4 \
+    L2_BACKEND=l2_plus
+```
+
+`siusiubeom_h4` uses L2 for the user-facing answer. `l2_plus` changes its
+internal retrieval order to local health DB first and targeted Lunit MCP second.
+Both values can still be overridden for local experiments.
+
 The submission keeps the credentials as tracked files and copies them into the image:
 
 ```dockerfile
