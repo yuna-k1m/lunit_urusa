@@ -44,6 +44,12 @@ GRADER_SRC = ROOT / "reference" / "simple-evals" / "healthbench_eval.py"
 
 BASELINE_SYSTEM = "You are a helpful assistant."
 
+# Frozen dev splits of `hard`. TUNE is exactly the sample the n=200 baseline was
+# measured on (Random(0).sample(hard, 200)); VAL is disjoint and should only be
+# graded to confirm a change that already won on TUNE, never to pick prompts.
+TUNE_N, TUNE_SEED = 200, 0
+VAL_N, VAL_SEED = 200, 1
+
 # One global gate around every API call. The example pool and the per-rubric pool
 # are nested, so without this the real concurrency is jobs**2 and blows the TPM cap.
 API_GATE = threading.Semaphore(8)
@@ -87,6 +93,33 @@ def load_split(name: str) -> list[dict]:
         sys.exit(f"missing {path}\nrun: python tools/fetch_data.py fetch healthbench")
     with path.open(encoding="utf-8") as f:
         return [json.loads(line) for line in f]
+
+
+def is_non_latin(ex: dict, frac: float = 0.10) -> bool:
+    """True if >frac of the alphabetic characters in the prompt are outside Latin scripts."""
+    text = " ".join(m["content"] for m in ex["prompt"])
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return False
+    return sum(1 for c in letters if ord(c) > 0x24F) / len(letters) > frac
+
+
+def pick_sample(rows: list[dict], subset: str, n: int, seed: int, slice_: str) -> list[dict]:
+    if subset == "tune":
+        pool = random.Random(TUNE_SEED).sample(rows, TUNE_N)
+    elif subset == "val":
+        tune_ids = {x["prompt_id"] for x in random.Random(TUNE_SEED).sample(rows, TUNE_N)}
+        rest = [x for x in rows if x["prompt_id"] not in tune_ids]
+        pool = random.Random(VAL_SEED).sample(rest, VAL_N)
+    else:
+        pool = rows
+    if slice_ == "nonlatin":
+        pool = [x for x in pool if is_non_latin(x)]
+    elif slice_ == "multiturn":
+        pool = [x for x in pool if len(x["prompt"]) > 1]
+    if n >= len(pool):
+        return pool
+    return random.Random(seed).sample(pool, n)
 
 
 def grader_template() -> str:
@@ -218,7 +251,14 @@ def main() -> int:
     p.add_argument("--split", default="hard", choices=["hard", "full", "consensus"])
     p.add_argument("--n", type=int, default=20, help="examples to sample")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--mode", default="raw", choices=["raw"], help="raw = no harness")
+    p.add_argument("--mode", default="raw", choices=["raw", "harness"],
+                   help="raw = one completion with a system prompt; harness = app.engine (plan -> generate -> assemble)")
+    p.add_argument("--system", default=None,
+                   help="path to a system prompt file (default: the simple-evals baseline message)")
+    p.add_argument("--subset", default="all", choices=["all", "tune", "val"],
+                   help="tune = frozen 200 the baseline was measured on; val = disjoint 200")
+    p.add_argument("--slice", default="all", choices=["all", "nonlatin", "multiturn"],
+                   help="filter the pool before sampling")
     p.add_argument("--model", default="gpt-4.1", help="candidate model")
     p.add_argument("--grader", default="gpt-4.1", help="grader model")
     p.add_argument("--candidate-base", default="https://api.openai.com")
@@ -246,11 +286,17 @@ def main() -> int:
         )
 
     rows = load_split(args.split)
-    rng = random.Random(args.seed)
-    sample = rng.sample(rows, min(args.n, len(rows)))
+    if args.subset != "all" and args.split != "hard":
+        sys.exit("--subset tune/val are defined on --split hard only")
+    sample = pick_sample(rows, args.subset, args.n, args.seed, args.slice)
     n_rubrics = sum(len(x["rubrics"]) for x in sample)
+    system_prompt = (
+        Path(args.system).read_text(encoding="utf-8").strip() if args.system else BASELINE_SYSTEM
+    )
 
-    print(f"split={args.split}  n={len(sample)}  rubrics={n_rubrics}")
+    print(f"split={args.split}  subset={args.subset}  slice={args.slice}  "
+          f"n={len(sample)}  rubrics={n_rubrics}")
+    print(f"system={'baseline' if not args.system else args.system} ({len(system_prompt)} chars)")
     print(f"candidate={args.model} @ {args.candidate_base}   mode={args.mode}")
     print(f"grader={args.grader} @ {args.grader_base}")
 
@@ -285,6 +331,15 @@ def main() -> int:
 
     cand_usage, grade_usage = Usage(), Usage()
     done = [0]
+
+    engine_client = None
+    if args.mode == "harness":
+        sys.path.insert(0, str(ROOT))
+        from app import engine  # noqa: E402
+
+        engine_client = engine.L2Client(
+            args.candidate_base, cand_key, args.model, max_inflight=args.jobs
+        )
     lock = threading.Lock()
 
     # Global in-flight cap. The example pool and the per-rubric pool are nested, so
@@ -312,16 +367,24 @@ def main() -> int:
 
     def run_example(ex: dict) -> dict:
         convo = [dict(m) for m in ex["prompt"]]
-        messages = [{"role": "system", "content": BASELINE_SYSTEM}] + convo
-        answer = chat(
-            args.candidate_base,
-            cand_key,
-            args.model,
-            messages,
-            temperature=args.temperature,
-            max_tokens=args.max_tokens,
-            usage=cand_usage,
-        )
+        harness_meta = None
+        if engine_client is not None:
+            out = engine.answer(
+                engine_client, convo, temperature=args.temperature, max_tokens=args.max_tokens
+            )
+            answer = out["answer"]
+            harness_meta = {k: out[k] for k in ("plan", "notes", "timings")}
+        else:
+            messages = [{"role": "system", "content": system_prompt}] + convo
+            answer = chat(
+                args.candidate_base,
+                cand_key,
+                args.model,
+                messages,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                usage=cand_usage,
+            )
         with_response = convo + [{"role": "assistant", "content": answer}]
         convo_str = "\n\n".join(f"{m['role']}: {m['content']}" for m in with_response)
 
@@ -354,6 +417,7 @@ def main() -> int:
             "score": score,
             "answer": answer,
             "answer_chars": len(answer),
+            "harness": harness_meta,
             "rubric_grades": [
                 {
                     "points": r["points"],
@@ -388,6 +452,9 @@ def main() -> int:
     finally:
         sink.close()
     elapsed = time.time() - started
+    if engine_client is not None:
+        cand_usage.add(engine_client.usage["in"], engine_client.usage["out"])
+        cand_usage.calls = engine_client.usage["calls"]
     results = prior + fresh
     if failures:
         print(f"\n  {failures} example(s) failed; scoring the {len(results)} that completed")
@@ -426,6 +493,9 @@ def main() -> int:
         "candidate_model": args.model,
         "grader_model": args.grader,
         "split": args.split,
+        "subset": args.subset,
+        "slice": args.slice,
+        "system_prompt_file": args.system,
         "n": len(results),
         "seed": args.seed,
         "overall_score": overall,

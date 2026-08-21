@@ -5,8 +5,8 @@
 Exposes GET /v1/models and POST /v1/chat/completions. The work is delegated to an
 *engine* selected by $DRIVER_ENGINE:
 
-    probe     answer every turn with a network/environment report (default for now)
-    harness   the real L2 two-stage harness (not built yet)
+    probe     answer every turn with a network/environment report
+    harness   L2 plan -> generate -> assemble (app/engine.py)  [default]
 """
 
 from __future__ import annotations
@@ -18,13 +18,15 @@ import uuid
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from app import probe
+from app import engine, probe
 
 MODEL_ID = os.environ.get("DRIVER_MODEL_ID", "lunit-urusa-driver")
-ENGINE = os.environ.get("DRIVER_ENGINE", "probe")
+ENGINE = os.environ.get("DRIVER_ENGINE", "harness")
+_l2 = engine.L2Client()
 
 app = FastAPI(title="lunit-urusa driver")
 
@@ -85,7 +87,12 @@ async def chat_completions(req: ChatRequest, raw: Request) -> JSONResponse:
     if ENGINE == "probe":
         answer = _probe_answer(req, raw)
     else:
-        answer = f"engine '{ENGINE}' not implemented"
+        msgs = [{"role": m.role, "content": _text(m.content)} for m in req.messages]
+        out = await run_in_threadpool(
+            engine.answer, _l2, msgs, temperature=req.temperature or 0.3,
+            max_tokens=req.max_tokens or 2048,
+        )
+        answer = out["answer"]
 
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
     body = {
