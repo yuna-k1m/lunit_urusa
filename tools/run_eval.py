@@ -385,7 +385,7 @@ def main() -> int:
                 planner=planner_client,
             )
             answer = out["answer"]
-            harness_meta = {k: out[k] for k in ("plan", "notes", "timings")}
+            harness_meta = {k: out.get(k) for k in ("plan", "notes", "timings", "review")}
         else:
             messages = [{"role": "system", "content": system_prompt}] + convo
             answer = chat(

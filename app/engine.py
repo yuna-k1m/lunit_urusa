@@ -58,6 +58,7 @@ def resolve_key(*env_names: str) -> str:
     return ""
 PLANNER_SYSTEM = (PROMPTS / "planner.md").read_text(encoding="utf-8").strip()
 GENERATION_SYSTEM = (PROMPTS / "generation.md").read_text(encoding="utf-8").strip()
+CRITIC_SYSTEM = (PROMPTS / "critic.md").read_text(encoding="utf-8").strip()
 
 REFUSAL_PATTERNS = re.compile(
     r"I can(?:'|’)?t provide|I cannot provide|I(?:'|’)?m an AI|I am an AI|I(?:'|’)?m not a doctor|I am not a doctor",
@@ -327,9 +328,21 @@ NO_DECLINE = (
 
 
 def generate(client: L2Client, messages: list[dict], plan: dict, *, temperature: float = 0.3,
-             max_tokens: int = 2048) -> tuple[str, bool]:
-    """Returns (draft, retried). One retry if the first draft declines."""
+             max_tokens: int = 2048, revision: tuple[str, str] | None = None) -> tuple[str, bool]:
+    """Returns (draft, retried). One retry if the first draft declines.
+
+    `revision=(previous_draft, notes)` asks for a revised full reply instead of a fresh one."""
     brief = build_brief(plan)
+    if revision:
+        prev, notes = revision
+        brief += (
+            "\n\nA senior physician reviewed your previous draft and requires these changes. "
+            "Write the complete, improved reply (not a diff), keeping everything that was correct. "
+            "Write it as your first and only reply: never mention a review, a reviewer, a clarification, "
+            "or a previous draft.\n"
+            + notes
+            + "\n\nYour previous draft:\n<draft>\n" + prev + "\n</draft>"
+        )
     convo = [{"role": m["role"], "content": m["content"]} for m in messages]
 
     def run(b: str) -> str:
@@ -343,6 +356,30 @@ def generate(client: L2Client, messages: list[dict], plan: dict, *, temperature:
         if not REFUSAL_PATTERNS.search(second[:800]):
             return second, True
     return draft, False
+
+
+# ---------------------------------------------------------------------- critic
+
+def critique(critic: L2Client, messages: list[dict], plan: dict, draft: str) -> dict | None:
+    """One review by the planner model. Returns the parsed verdict or None on failure."""
+    user = (
+        "<conversation>\n" + transcript(messages) + "\n</conversation>\n\n"
+        "<plan>\n" + json.dumps({k: v for k, v in plan.items() if not k.startswith("_")},
+                                 ensure_ascii=False) + "\n</plan>\n\n"
+        "<draft>\n" + draft + "\n</draft>\n\nNow output the JSON review."
+    )
+    try:
+        text = critic.chat([{"role": "system", "content": CRITIC_SYSTEM},
+                            {"role": "user", "content": user}],
+                           temperature=0.0, max_tokens=2000,
+                           response_format={"type": "json_object"})
+    except RuntimeError:
+        return None
+    raw = _parse_json(text)
+    if not raw or "needs_revision" not in raw:
+        return None
+    raw["needs_revision"] = bool(raw.get("needs_revision")) and bool(str(raw.get("revision_notes", "")).strip())
+    return raw
 
 
 # -------------------------------------------------------------------- assemble
@@ -436,12 +473,48 @@ def answer(client: L2Client, messages: list[dict], *, temperature: float = 0.3,
     t1 = time.time()
     draft, retried = generate(client, messages, plan, temperature=temperature, max_tokens=max_tokens)
     t2 = time.time()
+    review = None
+    revised = False
+    # Review + rewrite costs ~30-40 s. Skip it when the turn is already slow so a
+    # turn stays under TURN_BUDGET_S even if the evaluator has a tight timeout.
+    budget = float(os.environ.get("TURN_BUDGET_S", "100"))
+    if (planner is not None and planner is not client and os.environ.get("CRITIC", "1") != "0"
+            and (t2 - t0) < budget - 45):
+        review = critique(planner, messages, plan, draft)
+        if review and review["needs_revision"]:
+            rev_plan = plan
+            notes_txt = str(review["revision_notes"])
+            if review.get("interpretation_ok") is False:
+                # The plan's content items were built on the wrong reading: replace
+                # them with the critic's, and say so plainly, or L2 keeps both readings.
+                rev_plan = dict(plan)
+                rev_plan["key_points"] = _as_str_list(review.get("missing"), 8)
+                rev_plan["task_format"] = ""
+                rev_plan["core_request"] = ""
+                notes_txt = ("Your previous draft answered the WRONG question. Discard it entirely "
+                             "and answer the question as the reviewer describes. " + notes_txt)
+            try:
+                new_draft, _ = generate(client, messages, rev_plan, temperature=temperature,
+                                        max_tokens=max_tokens,
+                                        revision=(draft, notes_txt))
+                # Guard against a collapsed rewrite -- unless the draft answered the wrong
+                # question, in which case a much shorter correct answer is the goal.
+                floor = 400 if review.get("interpretation_ok") is False else 0.5 * len(draft.strip())
+                if len(new_draft.strip()) >= floor:
+                    draft, revised = new_draft, True
+            except RuntimeError:
+                pass
+    t3 = time.time()
     final, notes = assemble(draft, plan)
     notes["retried_refusal"] = retried
+    notes["reviewed"] = review is not None
+    notes["revised"] = revised
     notes["refusal_phrase"] = bool(REFUSAL_PATTERNS.search(final))
     return {
         "answer": final,
         "plan": plan,
         "notes": notes,
-        "timings": {"plan": round(t1 - t0, 1), "generate": round(t2 - t1, 1)},
+        "review": review,
+        "timings": {"plan": round(t1 - t0, 1), "generate": round(t2 - t1, 1),
+                    "review_revise": round(t3 - t2, 1)},
     }
