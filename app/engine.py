@@ -478,7 +478,7 @@ def answer(client: L2Client, messages: list[dict], *, temperature: float = 0.3,
     # Review + rewrite costs ~30-40 s. Skip it when the turn is already slow so a
     # turn stays under TURN_BUDGET_S even if the evaluator has a tight timeout.
     budget = float(os.environ.get("TURN_BUDGET_S", "100"))
-    if (planner is not None and planner is not client and os.environ.get("CRITIC", "1") != "0"
+    if (planner is not None and planner is not client and os.environ.get("CRITIC", "0") == "1"
             and (t2 - t0) < budget - 45):
         review = critique(planner, messages, plan, draft)
         if review and review["needs_revision"]:

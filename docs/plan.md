@@ -48,6 +48,7 @@ Guardrails against overfitting:
 | 3 | L2-only system prompt distilled from cluster policies | done | v2: **0.213**, paired Δ +0.022 [−0.018, +0.064] — not significant |
 | 3b | L2-only planner → brief → assemble (`app/engine.py`) | **h3 = current engine** | h1 0.239 (+0.049); h2 aborted (validation exposed 28% planner role-breaks); **h3 0.271, Δ vs base +0.080 [+0.037, +0.122]**, 99W/63L, 0 fallbacks |
 | 4 | Planner = `gpt-5.6-sol`, writer = L2 (`--planner-model` / `PLANNER_MODEL`) | **h4 = submitted (SHA 50acb80)** · **val confirmed: raw 0.130 → 0.269, Δ +0.139 [+0.092, +0.193]** | **h4 0.357**, Δ vs base **+0.166 [+0.121, +0.211]** 135W/46L; Δ vs h3 +0.086 [+0.043, +0.129]. Runtime use still gated on eval-box reachability (#1) |
+| 4b | Critic pass (sol reviews, L2 revises once; `CRITIC=1`) | measured, **off by default** | h5 tune 0.377 vs h4 0.359, Δ +0.018 [−0.023, +0.060] — n.s.; complex_responses +0.013; +30 s/turn. Not worth the timeout risk |
 | 5 | L2 two-stage harness with MCP (retrieval + generation prompts, `finalize_retrieval`, cite_uid resolution, tool-call cap) | not started | — |
 | 6 | Multi-turn: fold history into a self-contained query before retrieval | not started | — |
 | 7 | Korean chat loop against the patient simulator, judged by a rubric written from the cluster policies | not started | — |
