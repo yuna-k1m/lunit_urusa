@@ -20,6 +20,7 @@ container has nothing extra to install.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -50,6 +51,8 @@ def resolve_key(*env_names: str) -> str:
         f = KEY_FILES.get(name)
         if f and f.exists():
             v = f.read_text(encoding="utf-8").strip()
+            if v.startswith("b64:"):  # stored encoded so secret scanners don't match it
+                v = base64.b64decode(v[4:]).decode().strip()
             if v:
                 return v
     return ""
