@@ -53,18 +53,22 @@ class L2Client:
         self.key = key or os.environ.get("LUNIT_FM_API_KEY") or os.environ.get("LUNIT_KEY") or ""
         self.model = model or os.environ.get("LUNIT_FM_MODEL", "Lunit/L2-preview")
         self.timeout = timeout
+        # OpenAI reasoning models (gpt-5*) reject `temperature` and `max_tokens`
+        self.reasoning_style = self.model.startswith(("gpt-5", "o1", "o3", "o4"))
+        self.reasoning_effort = os.environ.get("PLANNER_REASONING_EFFORT", "low")
         self.gate = threading.Semaphore(max_inflight)
         self.usage = {"in": 0, "out": 0, "calls": 0}
         self._ulock = threading.Lock()
 
     def chat(self, messages: list[dict], *, temperature: float, max_tokens: int,
              response_format: dict | None = None, retries: int = 6) -> str:
-        body: dict = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
+        body: dict = {"model": self.model, "messages": messages}
+        if self.reasoning_style:
+            body["max_completion_tokens"] = max_tokens
+            body["reasoning_effort"] = self.reasoning_effort
+        else:
+            body["temperature"] = temperature
+            body["max_tokens"] = max_tokens
         if response_format:
             body["response_format"] = response_format
         req = urllib.request.Request(
@@ -203,6 +207,7 @@ def transcript(messages: list[dict]) -> str:
 
 
 def make_plan(client: L2Client, messages: list[dict]) -> dict:
+    """`client` is whichever model plans: L2 itself, or a stronger model (see planner_from_env)."""
     # The conversation goes in as a transcript inside ONE user message. Given real
     # chat turns, L2 joins the conversation and answers the user ~25% of the time
     # (`{"advice": ...}`); given a transcript to analyze, it plans.
@@ -359,11 +364,28 @@ def assemble(answer: str, plan: dict) -> tuple[str, dict]:
 
 # ------------------------------------------------------------------------ api
 
+def planner_from_env(default: L2Client, max_inflight: int = 8) -> L2Client:
+    """PLANNER_MODEL unset -> L2 plans. Otherwise an OpenAI-compatible endpoint
+    (PLANNER_BASE, key from $PLANNER_KEY_ENV, default OPENAI_API_KEY)."""
+    model = os.environ.get("PLANNER_MODEL")
+    if not model:
+        return default
+    key_env = os.environ.get("PLANNER_KEY_ENV", "OPENAI_API_KEY")
+    return L2Client(
+        os.environ.get("PLANNER_BASE", "https://api.openai.com"),
+        os.environ.get(key_env, ""),
+        model,
+        max_inflight=max_inflight,
+    )
+
+
 def answer(client: L2Client, messages: list[dict], *, temperature: float = 0.3,
-           max_tokens: int = 2048) -> dict:
-    """Full turn. Returns {'answer', 'plan', 'notes', 'timings'}."""
+           max_tokens: int = 2048, planner: L2Client | None = None) -> dict:
+    """Full turn. Returns {'answer', 'plan', 'notes', 'timings'}. The final text is
+    always L2's; `planner` (if given) only produces the brief."""
     t0 = time.time()
-    plan = make_plan(client, messages)
+    plan = make_plan(planner or client, messages)
+    plan["_planner_model"] = (planner or client).model
     t1 = time.time()
     draft, retried = generate(client, messages, plan, temperature=temperature, max_tokens=max_tokens)
     t2 = time.time()

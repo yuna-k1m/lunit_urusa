@@ -265,6 +265,10 @@ def main() -> int:
     p.add_argument("--candidate-key-env", default="OPENAI_API_KEY")
     p.add_argument("--grader-base", default="https://api.openai.com")
     p.add_argument("--grader-key-env", default="OPENAI_API_KEY")
+    p.add_argument("--planner-model", default=None,
+                   help="harness mode: model that writes the plan (default: the candidate itself)")
+    p.add_argument("--planner-base", default="https://api.openai.com")
+    p.add_argument("--planner-key-env", default="OPENAI_API_KEY")
     p.add_argument("--jobs", type=int, default=8)
     p.add_argument("--temperature", type=float, default=0.5)
     p.add_argument("--max-tokens", type=int, default=2048)
@@ -340,6 +344,13 @@ def main() -> int:
         engine_client = engine.L2Client(
             args.candidate_base, cand_key, args.model, max_inflight=args.jobs
         )
+        planner_client = None
+        if args.planner_model:
+            planner_client = engine.L2Client(
+                args.planner_base, os.environ.get(args.planner_key_env, ""),
+                args.planner_model, max_inflight=args.jobs,
+            )
+            print(f"planner={args.planner_model} @ {args.planner_base}")
     lock = threading.Lock()
 
     # Global in-flight cap. The example pool and the per-rubric pool are nested, so
@@ -370,7 +381,8 @@ def main() -> int:
         harness_meta = None
         if engine_client is not None:
             out = engine.answer(
-                engine_client, convo, temperature=args.temperature, max_tokens=args.max_tokens
+                engine_client, convo, temperature=args.temperature, max_tokens=args.max_tokens,
+                planner=planner_client,
             )
             answer = out["answer"]
             harness_meta = {k: out[k] for k in ("plan", "notes", "timings")}
@@ -455,6 +467,9 @@ def main() -> int:
     if engine_client is not None:
         cand_usage.add(engine_client.usage["in"], engine_client.usage["out"])
         cand_usage.calls = engine_client.usage["calls"]
+        if planner_client is not None:
+            pu = planner_client.usage
+            print(f"  planner {args.planner_model}: {pu['in']:,}in/{pu['out']:,}out over {pu['calls']} calls")
     results = prior + fresh
     if failures:
         print(f"\n  {failures} example(s) failed; scoring the {len(results)} that completed")
@@ -491,6 +506,7 @@ def main() -> int:
     summary = {
         "mode": args.mode,
         "candidate_model": args.model,
+        "planner_model": args.planner_model if args.mode == "harness" else None,
         "grader_model": args.grader,
         "split": args.split,
         "subset": args.subset,

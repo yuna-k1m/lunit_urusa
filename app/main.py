@@ -27,6 +27,7 @@ from app import engine, probe
 MODEL_ID = os.environ.get("DRIVER_MODEL_ID", "lunit-urusa-driver")
 ENGINE = os.environ.get("DRIVER_ENGINE", "harness")
 _l2 = engine.L2Client()
+_planner = engine.planner_from_env(_l2)
 
 app = FastAPI(title="lunit-urusa driver")
 
@@ -90,7 +91,7 @@ async def chat_completions(req: ChatRequest, raw: Request) -> JSONResponse:
         msgs = [{"role": m.role, "content": _text(m.content)} for m in req.messages]
         out = await run_in_threadpool(
             engine.answer, _l2, msgs, temperature=req.temperature or 0.3,
-            max_tokens=req.max_tokens or 2048,
+            max_tokens=req.max_tokens or 2048, planner=_planner,
         )
         answer = out["answer"]
 

@@ -42,11 +42,12 @@ Guardrails against overfitting:
 | # | Step | Status | Result |
 | --- | --- | --- | --- |
 | 0 | Raw L2 baseline, tune n=200 | done | **0.190** [0.145, 0.238] |
+|   | *Score ladder (tune n=200):* raw 0.190 → v2 prompt 0.213 → h1 0.239 → h3 0.271 → **h4 0.357** | | |
 | 1 | Probe container → what can the eval box reach; how does the evaluator send turns | built, awaiting trial | — |
 | 2 | `run_eval.py`: `--system`, `--subset tune/val`, `--slice nonlatin/multiturn` | done | — |
 | 3 | L2-only system prompt distilled from cluster policies | done | v2: **0.213**, paired Δ +0.022 [−0.018, +0.064] — not significant |
 | 3b | L2-only planner → brief → assemble (`app/engine.py`) | **h3 = current engine** | h1 0.239 (+0.049); h2 aborted (validation exposed 28% planner role-breaks); **h3 0.271, Δ vs base +0.080 [+0.037, +0.122]**, 99W/63L, 0 fallbacks |
-| 4 | Swap the planner to a frontier model (if reachable) | blocked on #1 | — |
+| 4 | Planner = `gpt-5.6-sol`, writer = L2 (`--planner-model` / `PLANNER_MODEL`) | **h4 tune done; val running** | **h4 0.357**, Δ vs base **+0.166 [+0.121, +0.211]** 135W/46L; Δ vs h3 +0.086 [+0.043, +0.129]. Runtime use still gated on eval-box reachability (#1) |
 | 5 | L2 two-stage harness with MCP (retrieval + generation prompts, `finalize_retrieval`, cite_uid resolution, tool-call cap) | not started | — |
 | 6 | Multi-turn: fold history into a self-contained query before retrieval | not started | — |
 | 7 | Korean chat loop against the patient simulator, judged by a rubric written from the cluster policies | not started | — |
