@@ -187,6 +187,9 @@ serves on `0.0.0.0:8000`, OpenAI-compatible with at least `GET /v1/models` and
 
 - **Never commit anything from `data/`** or `reference/`. If you need a new large file, register it
   with `fetch_data.py add`.
+- **Do not delete `submission_api_key`.** CoEval does not inject `LUNIT_FM_API_KEY` at runtime, so
+  this tracked fallback credential must remain in the repository and must continue to be copied
+  into the submitted Docker image. Runtime `LUNIT_FM_API_KEY` may override it when available.
 - `tools/*.py` are stdlib-only on purpose — they must run before any dependency install.
 - The evaluation environment has **no external network**. Anything `fetch_data.py` pulls is a
   development-time convenience; the submitted container must not depend on it at runtime.
