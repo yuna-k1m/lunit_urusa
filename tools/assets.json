@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "comment": "Large/binary assets are NOT committed (no git-lfs). tools/fetch_data.py downloads and verifies them from this manifest. See AGENTS.md.",
+  "assets": [
+    {
+      "name": "healthbench-full",
+      "group": "healthbench",
+      "url": "https://openaipublic.blob.core.windows.net/simple-evals/healthbench/2025-05-07-06-14-12_oss_eval.jsonl",
+      "dest": "data/healthbench/healthbench_full.jsonl",
+      "size": 60258154,
+      "sha256": "e99dd3c6372c10d6fcc5e385c5fae69d0dd40392dae56836ef9493ae324ecd2f",
+      "description": "HealthBench main set - 5,000 examples, 57,237 rubrics"
+    },
+    {
+      "name": "healthbench-hard",
+      "group": "healthbench",
+      "url": "https://openaipublic.blob.core.windows.net/simple-evals/healthbench/hard_2025-05-08-21-00-10.jsonl",
+      "dest": "data/healthbench/healthbench_hard.jsonl",
+      "size": 12581564,
+      "sha256": "b0320430e5cd974e746585594c1dd10b5a3fc2aff9c72b26106c2c4a069d74e9",
+      "description": "HealthBench Hard - 1,000 examples, subset of full"
+    },
+    {
+      "name": "healthbench-consensus",
+      "group": "healthbench",
+      "url": "https://openaipublic.blob.core.windows.net/simple-evals/healthbench/consensus_2025-05-09-20-00-46.jsonl",
+      "dest": "data/healthbench/healthbench_consensus.jsonl",
+      "size": 36921504,
+      "sha256": "fabe37553327238928b05357d8b309737b5d426d6dee432a3376da618d0969d6",
+      "description": "HealthBench Consensus - 3,671 examples with cluster-level rubrics"
+    },
+    {
+      "name": "healthbench-meta-eval",
+      "group": "healthbench-extra",
+      "url": "https://openaipublic.blob.core.windows.net/simple-evals/healthbench/2025-05-07-06-14-12_oss_meta_eval.jsonl",
+      "dest": "data/healthbench/healthbench_meta_eval.jsonl",
+      "size": 136224466,
+      "sha256": "6a343ed3fcb6f28353c2c6c157ae30ddf2db874c947b27ba474ad54da9c5dbac",
+      "description": "Physician-vs-grader agreement labels (136 MB, only needed if you build your own grader)"
+    },
+    {
+      "name": "simple-evals-healthbench-eval",
+      "group": "grader",
+      "url": "https://raw.githubusercontent.com/openai/simple-evals/main/healthbench_eval.py",
+      "dest": "reference/simple-evals/healthbench_eval.py",
+      "size": null,
+      "sha256": null,
+      "description": "Official grader template + scoring formula (tracks main, so unpinned)"
+    },
+    {
+      "name": "simple-evals-healthbench-meta-eval",
+      "group": "grader",
+      "url": "https://raw.githubusercontent.com/openai/simple-evals/main/healthbench_meta_eval.py",
+      "dest": "reference/simple-evals/healthbench_meta_eval.py",
+      "size": null,
+      "sha256": null,
+      "description": "Grader-vs-physician agreement eval (tracks main, so unpinned)"
+    },
+    {
+      "name": "simple-evals-common",
+      "group": "grader",
+      "url": "https://raw.githubusercontent.com/openai/simple-evals/main/common.py",
+      "dest": "reference/simple-evals/common.py",
+      "size": null,
+      "sha256": null,
+      "description": "simple-evals support code (tracks main, so unpinned)"
+    },
+    {
+      "name": "simple-evals-types",
+      "group": "grader",
+      "url": "https://raw.githubusercontent.com/openai/simple-evals/main/types.py",
+      "dest": "reference/simple-evals/types.py",
+      "size": null,
+      "sha256": null,
+      "description": "simple-evals type definitions (tracks main, so unpinned)"
+    }
+  ]
+}

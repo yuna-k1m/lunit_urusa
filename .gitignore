@@ -1,0 +1,28 @@
+# large / fetched assets are never committed - see AGENTS.md
+# pull them with: python tools/fetch_data.py
+data/*
+!data/.gitkeep
+reference/
+
+# generated from the benchmark data (canary-tagged) - regenerate locally:
+#   python tools/make_theme_docs.py
+docs/healthbench-themes/
+
+# eval outputs (contain benchmark text + model answers)
+results/
+
+.venv/
+__pycache__/
+*.pyc
+*.part
+*.bad
+healthbench_sample.json
+
+# secrets - never commit
+.env
+.env.*
+!.env.example
+
+# editors
+.idea/
+.vscode/
