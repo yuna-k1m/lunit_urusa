@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from fastapi.testclient import TestClient
 
-from app import DEFAULT_MODEL, app
+from app import DEFAULT_MODEL, app, get_api_key
 
 
 class ApiContractTest(unittest.TestCase):
@@ -28,12 +28,22 @@ class ApiContractTest(unittest.TestCase):
         self.assertEqual(response.json()["error"]["param"], "messages")
 
     def test_chat_requires_api_key(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("app.get_api_key", return_value=None),
+        ):
             response = self.client.post(
                 "/v1/chat/completions",
                 json={"messages": [{"role": "user", "content": "Hello"}]},
             )
         self.assertEqual(response.status_code, 503)
+
+    def test_bundled_api_key_fallback(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("app.Path.read_text", return_value="lunit_file_test\n"),
+        ):
+            self.assertEqual(get_api_key(), "lunit_file_test")
 
     def test_chat_forwards_full_conversation(self) -> None:
         upstream_body = {

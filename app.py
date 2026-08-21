@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -12,15 +13,27 @@ from fastapi.responses import JSONResponse
 DEFAULT_API_URL = "https://model.hackathon.lunit.io"
 DEFAULT_MODEL = "Lunit/L2-preview"
 REQUEST_TIMEOUT_SECONDS = 120.0
+DEFAULT_API_KEY_FILE = Path(__file__).with_name("submission_api_key")
 
 app = FastAPI(title="Urusa Conversation Driver", version="0.2.0")
+
+
+def get_api_key() -> str | None:
+    """Prefer an injected key, then use the key bundled for CoEval."""
+    api_key = os.getenv("LUNIT_FM_API_KEY")
+    if api_key:
+        return api_key
+    try:
+        return DEFAULT_API_KEY_FILE.read_text(encoding="utf-8").strip() or None
+    except FileNotFoundError:
+        return None
 
 
 def settings() -> tuple[str, str, str | None]:
     return (
         os.getenv("LUNIT_FM_API_URL", DEFAULT_API_URL).rstrip("/"),
         os.getenv("LUNIT_FM_MODEL", DEFAULT_MODEL),
-        os.getenv("LUNIT_FM_API_KEY"),
+        get_api_key(),
     )
 
 
