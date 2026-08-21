@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -13,9 +14,21 @@ from fastapi.responses import JSONResponse, Response
 
 DEFAULT_API_URL = "https://model.hackathon.lunit.io"
 DEFAULT_MODEL = "Lunit/L2-preview"
+DEFAULT_API_KEY_FILE = Path(__file__).with_name("submission_api_key")
 RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
 
 app = FastAPI(title="Lunit Hackathon Conversation Driver", version="0.1.0")
+
+
+def get_api_key() -> str | None:
+    """Load the runtime credential, falling back to the submission-only key file."""
+    api_key = os.getenv("LUNIT_FM_API_KEY")
+    if api_key:
+        return api_key
+    try:
+        return DEFAULT_API_KEY_FILE.read_text(encoding="utf-8").strip() or None
+    except FileNotFoundError:
+        return None
 
 
 def openai_error(message: str, status_code: int, error_type: str) -> JSONResponse:
@@ -98,7 +111,7 @@ async def chat_completions(request: Request) -> Response:
             "invalid_request_error",
         )
 
-    api_key = os.getenv("LUNIT_FM_API_KEY")
+    api_key = get_api_key()
     if not api_key:
         return openai_error(
             "Server is missing LUNIT_FM_API_KEY.", 500, "server_error"
@@ -121,4 +134,3 @@ async def chat_completions(request: Request) -> Response:
         status_code=upstream.status_code,
         media_type=content_type.split(";", 1)[0],
     )
-
